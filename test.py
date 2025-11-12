@@ -1,11 +1,11 @@
 import os
 
-from anthropic import Anthropic
+from openai import OpenAI
 from rulechef import RuleChef, Task
 from rulechef.core import RuleFormat
 
 # Setup
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 task = Task(
     name="Q&A",
     description="Extract answer spans from text",

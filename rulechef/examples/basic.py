@@ -1,10 +1,10 @@
 """Basic example usage of RuleChef"""
 
-from anthropic import Anthropic
+from openai import OpenAI
 from rulechef import RuleChef, Task
 
 # Setup
-client = Anthropic()
+client = OpenAI()
 task = Task(
     name="Q&A",
     description="Extract answer spans from historical text",

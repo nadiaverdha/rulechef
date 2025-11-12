@@ -1,7 +1,7 @@
 """Interactive CLI for RuleChef"""
 
 import os
-from anthropic import Anthropic
+from openai import OpenAI
 from rulechef.engine import RuleChef
 from rulechef.core import Task
 
@@ -10,11 +10,11 @@ def main():
     """Main CLI loop"""
 
     # Initialize
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        api_key = input("Enter ANTHROPIC_API_KEY: ")
+        api_key = input("Enter OPENAI_API_KEY: ")
 
-    client = Anthropic(api_key=api_key)
+    client = OpenAI(api_key=api_key)
 
     # Create task
     task = Task(
@@ -24,7 +24,27 @@ def main():
         output_schema={"spans": "List[Span]"},
     )
 
-    chef = RuleChef(task, client)
+    # Ask user about sampling strategy
+    print("\nSampling Strategies:")
+    print("  [1] balanced   - Mix examples from across dataset (default)")
+    print("  [2] recent     - Most recently added examples")
+    print("  [3] diversity  - Spread samples across dataset range")
+    print("  [4] uncertain  - Active learning (low-confidence examples)")
+    print("  [5] varied     - Mix of all strategies")
+    strategy_choice = (
+        input("\nSelect sampling strategy (1-5, default 1): ").strip() or "1"
+    )
+    strategies = {
+        "1": "balanced",
+        "2": "recent",
+        "3": "diversity",
+        "4": "uncertain",
+        "5": "varied",
+    }
+    sampling_strategy = strategies.get(strategy_choice, "balanced")
+
+    chef = RuleChef(task, client, sampling_strategy=sampling_strategy)
+    print(f"Using sampling strategy: {sampling_strategy}\n")
 
     # Main menu
     while True:

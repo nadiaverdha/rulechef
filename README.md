@@ -15,17 +15,17 @@ pip install -e .
 
 ### CLI
 ```bash
-export ANTHROPIC_API_KEY=your_key_here
+export OPENAI_API_KEY=your_key_here
 rulechef
 ```
 
 ### Python
 ```python
-from anthropic import Anthropic
+from openai import OpenAI
 from rulechef import RuleChef, Task
 
 # Setup
-client = Anthropic(api_key="...")
+client = OpenAI(api_key="...")
 task = Task(
     name="Q&A",
     description="Extract answer spans from text",

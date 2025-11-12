@@ -3,7 +3,7 @@
 import json
 import re
 from typing import Dict, List, Optional
-from anthropic import Anthropic
+from openai import OpenAI
 
 from rulechef.core import Rule, RuleFormat, Span, Dataset, Correction
 
@@ -12,10 +12,122 @@ class RuleLearner:
     """Learns extraction rules from examples using LLM"""
 
     def __init__(
-        self, llm: Anthropic, allowed_formats: Optional[List[RuleFormat]] = None
+        self,
+        llm: OpenAI,
+        allowed_formats: Optional[List[RuleFormat]] = None,
+        sampling_strategy: str = "balanced",
+        model: str = "gpt-4o-mini",
     ):
         self.llm = llm
         self.allowed_formats = allowed_formats or [RuleFormat.REGEX, RuleFormat.CODE]
+        self.sampling_strategy = sampling_strategy
+        self.model = model
+
+    # ========================================
+    # Smart Sampling (for large datasets)
+    # ========================================
+
+    def _sample_training_data(
+        self, dataset: Dataset, max_samples: int = 100, strategy: str = "balanced"
+    ):
+        """
+        Intelligently sample training data for prompt inclusion.
+
+        Strategies:
+        - 'balanced': Mix of examples from across dataset
+        - 'corrections_first': Prioritize recent examples (after user corrections)
+        - 'recent': Most recently added examples
+        - 'diversity': Spread samples across dataset range
+        - 'uncertain': Examples with lowest confidence (active learning)
+        - 'varied': Mix strategies - corrections + recent + diverse
+        """
+        samples = []
+
+        # Priority 1: ALL corrections (they're high-value, usually few)
+        samples.extend(dataset.corrections)
+
+        if len(samples) >= max_samples:
+            return samples[:max_samples]
+
+        # Priority 2: Examples (up to max_samples - corrections)
+        remaining_budget = max_samples - len(samples)
+        examples = dataset.examples
+
+        if not examples:
+            return samples[:max_samples]
+
+        if strategy == "balanced":
+            # Simple: take first N examples (original diverse ones)
+            samples.extend(examples[:remaining_budget])
+
+        elif strategy == "corrections_first":
+            # After user correction, prioritize recent examples
+            samples.extend(
+                sorted(examples, key=lambda e: e.timestamp, reverse=True)[
+                    :remaining_budget
+                ]
+            )
+
+        elif strategy == "recent":
+            # Most recent examples only
+            samples.extend(
+                sorted(examples, key=lambda e: e.timestamp, reverse=True)[
+                    :remaining_budget
+                ]
+            )
+
+        elif strategy == "diversity":
+            # Spread samples across dataset range (every Nth example)
+            if len(examples) <= remaining_budget:
+                samples.extend(examples)
+            else:
+                step = len(examples) // remaining_budget
+                samples.extend([examples[i * step] for i in range(remaining_budget)])
+
+        elif strategy == "uncertain":
+            # Active learning: prioritize low-confidence examples
+            # Examples with lower confidence indicate uncertain/edge cases
+            sorted_by_confidence = sorted(
+                examples, key=lambda e: e.confidence, reverse=False
+            )
+            samples.extend(sorted_by_confidence[:remaining_budget])
+
+        elif strategy == "varied":
+            # Mixed strategy: 40% recent + 40% diverse + 20% low-confidence
+            thirds = remaining_budget // 3
+            recent = sorted(examples, key=lambda e: e.timestamp, reverse=True)[:thirds]
+            diverse = [
+                examples[i * (len(examples) // thirds)]
+                for i in range(1, thirds + 1)
+                if i * (len(examples) // thirds) < len(examples)
+            ]
+            uncertain = sorted(examples, key=lambda e: e.confidence, reverse=False)[
+                : remaining_budget - len(recent) - len(diverse)
+            ]
+            samples.extend(recent + diverse + uncertain)
+
+        return samples[:max_samples]
+
+    def _sample_failures(self, failures: List[Dict], max_samples: int = 20):
+        """
+        Intelligently sample failures for refinement.
+
+        Prioritizes:
+        1. ALL correction failures (user-verified mistakes - highest value)
+        2. Other failures up to remaining budget
+        """
+        correction_failures = [f for f in failures if f.get("is_correction", False)]
+        other_failures = [f for f in failures if not f.get("is_correction", False)]
+
+        # Always include all correction failures
+        sampled = correction_failures
+
+        # Add other failures up to budget
+        remaining_budget = max_samples - len(sampled)
+        if remaining_budget > 0:
+            sampled.extend(other_failures[:remaining_budget])
+
+        return sampled[:max_samples]
 
     # ========================================
     # Rule Synthesis
@@ -31,13 +143,13 @@ class RuleLearner:
 
         start = time.time()
         try:
-            response = self.llm.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=4000,
+            response = self.llm.chat.completions.create(
+                model=self.model,
+                max_completion_tokens=4000,
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            result = self._parse_json(response.content[0].text)
+            result = self._parse_json(response.choices[0].message.content)
 
             # Extract rules from response
             rules = []
@@ -84,12 +196,16 @@ Output schema: {dataset.task.output_schema}
 
 """
 
+        # Smart sample data for prompt (instead of hard [:5] limits)
+        sampled_data = self._sample_training_data(
+            dataset, max_samples=50, strategy=self.sampling_strategy
+        )
+
         # Add corrections (highest priority)
-        if dataset.corrections:
-            prompt += (
-                "CORRECTIONS (Learn from failures - these show what went wrong):\n"
-            )
-            for corr in dataset.corrections[:5]:
+        corrections_in_sample = [d for d in sampled_data if isinstance(d, Correction)]
+        if corrections_in_sample:
+            prompt += f"CORRECTIONS (Learn from failures - {len(corrections_in_sample)} shown):\n"
+            for corr in corrections_in_sample:
                 prompt += f"\nInput: {json.dumps(corr.input)}\n"
                 prompt += f"Got (WRONG): {json.dumps(corr.model_output)}\n"
                 prompt += f"Expected (CORRECT): {json.dumps(corr.expected_output)}\n"
@@ -97,9 +213,10 @@ Output schema: {dataset.task.output_schema}
                     prompt += f"Feedback: {corr.feedback}\n"
 
         # Add examples
-        if dataset.examples:
-            prompt += "\nTRAINING EXAMPLES:\n"
-            for ex in dataset.examples[:5]:
+        examples_in_sample = [d for d in sampled_data if not isinstance(d, Correction)]
+        if examples_in_sample:
+            prompt += f"\nTRAINING EXAMPLES ({len(examples_in_sample)} shown):\n"
+            for ex in examples_in_sample:
                 prompt += f"\nInput: {json.dumps(ex.input)}\n"
                 prompt += f"Output: {json.dumps(ex.expected_output)}\n"
 
@@ -109,10 +226,30 @@ Output schema: {dataset.task.output_schema}
             for fb in dataset.feedback:
                 prompt += f"- {fb}\n"
 
+        # Add existing rules for incremental learning
+        if dataset.rules:
+            prompt += f"\n\nEXISTING RULES ({len(dataset.rules)} current):\n"
+            for rule in dataset.rules:
+                success_rate = (
+                    f"{rule.successes / rule.times_applied * 100:.1f}%"
+                    if rule.times_applied > 0
+                    else "untested"
+                )
+                prompt += f"\n- {rule.name} (priority {rule.priority}, success: {success_rate})\n"
+                prompt += f"  Format: {rule.format.value}\n"
+                prompt += f"  Pattern: {rule.content[:100]}{'...' if len(rule.content) > 100 else ''}\n"
+                prompt += f"  Confidence: {rule.confidence:.2f}\n"
+
+            prompt += "\nCONSIDER:\n"
+            prompt += "- Refine existing high-performing rules\n"
+            prompt += "- Fix or replace low-performing rules\n"
+            prompt += "- Keep rules that work well\n"
+            prompt += "- Add new rules for uncovered patterns\n"
+
         prompt += f"""
 
 YOUR TASK:
-Synthesize a complete ruleset (max {max_rules} rules) that:
+{"Update and refine" if dataset.rules else "Synthesize a complete"} ruleset (max {max_rules} rules) that:
 1. Handles all corrections correctly (CRITICAL - these show failure modes)
 2. Works on all examples
 3. Respects user feedback
@@ -278,17 +415,15 @@ IMPORTANT: Return ONLY valid JSON. Ensure:
     ) -> Optional[List[Rule]]:
         """Refine rules based on failures"""
 
-        # Prioritize correction failures
-        priority_failures = sorted(
-            failures, key=lambda f: f.get("is_correction", False), reverse=True
-        )
+        # Sample failures intelligently: ALL correction failures + sample of other failures
+        sampled_failures = self._sample_failures(failures, max_samples=20)
 
         prompt = f"""You previously generated these rules:
 
 {self._format_rules(current_rules)}
 
 But they failed on these cases:
-{json.dumps(priority_failures[:10], indent=2)}
+{json.dumps(sampled_failures, indent=2)}
 
 Refine the ruleset to fix these failures while maintaining performance on other examples.
 
@@ -311,13 +446,12 @@ Return refined ruleset in same JSON format:
 """
 
         try:
-            response = self.llm.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=4000,
+            response = self.llm.chat.completions.create(
+                model=self.model,
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            result = self._parse_json(response.content[0].text)
+            result = self._parse_json(response.choices[0].message.content)
 
             # Extract refined rules
             rules = []
@@ -543,13 +677,12 @@ Return JSON:
 
 Example #{seed + 1}:"""
 
-        response = self.llm.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
+        response = self.llm.chat.completions.create(
+            model=self.model,
             messages=[{"role": "user", "content": prompt}],
         )
 
-        text = response.content[0].text
+        text = response.choices[0].message.content
         try:
             if "```json" in text:
                 text = text.split("```json")[1].split("```")[0]

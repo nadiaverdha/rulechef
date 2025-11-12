@@ -1,13 +1,18 @@
 """Main RuleChef orchestrator"""
 
 import json
+import time
+import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 
-from anthropic import Anthropic
+from openai import OpenAI
 
 from rulechef.core import Task, Dataset, Example, Correction, Rule, RuleFormat
 from rulechef.learner import RuleLearner
+from rulechef.buffer import ExampleBuffer
+from rulechef.coordinator import CoordinatorProtocol, SimpleCoordinator
+from rulechef.openai_wrapper import OpenAIObserver
 
 
 class RuleChef:
@@ -16,17 +21,42 @@ class RuleChef:
     def __init__(
         self,
         task: Task,
-        client: Optional[Anthropic] = None,
+        client: Optional[OpenAI] = None,
         dataset_name: str = "default",
         storage_path: str = "./rulechef_data",
         allowed_formats: Optional[List[RuleFormat]] = None,
+        sampling_strategy: str = "balanced",
+        coordinator: Optional[CoordinatorProtocol] = None,
+        auto_trigger: bool = False,
+        model: str = "gpt-4o-mini",
     ):
         self.task = task
-        self.llm = client or Anthropic()
+        self.llm = client or OpenAI()
+        self.model = model
         self.dataset = Dataset(name=dataset_name, task=task)
         self.storage_path = Path(storage_path)
         self.allowed_formats = allowed_formats or [RuleFormat.REGEX, RuleFormat.CODE]
-        self.learner = RuleLearner(self.llm, allowed_formats=self.allowed_formats)
+        self.sampling_strategy = sampling_strategy
+        self.learner = RuleLearner(
+            self.llm,
+            allowed_formats=self.allowed_formats,
+            sampling_strategy=sampling_strategy,
+            model=model,
+        )
+
+        # Coordinator for learning decisions (swappable simple/agentic)
+        self.coordinator = coordinator or SimpleCoordinator()
+
+        # Buffer for observed examples (buffer-first architecture)
+        self.buffer = ExampleBuffer()
+
+        # Auto-trigger: coordinator checks after each add_example/add_correction
+        self.auto_trigger = auto_trigger
+
+        # Observation mode components
+        self._observer: Optional[OpenAIObserver] = None
+        self._learning_thread: Optional[threading.Thread] = None
+        self._stop_learning = threading.Event()
 
         # Create storage directory
         self.storage_path.mkdir(parents=True, exist_ok=True)
@@ -41,16 +71,23 @@ class RuleChef:
     def add_example(
         self, input_data: Dict, output_data: Dict, source: str = "human_labeled"
     ):
-        """Add a labeled training example"""
-        example = Example(
-            id=self._generate_id(),
-            input=input_data,
-            expected_output=output_data,
-            source=source,
+        """
+        Add a labeled training example.
+
+        Uses buffer-first architecture: example goes to buffer, then coordinator
+        decides when to trigger learning.
+        """
+        # Add to buffer (not dataset directly)
+        self.buffer.add_human_example(input_data, output_data)
+
+        stats = self.buffer.get_stats()
+        print(
+            f"✓ Added example (buffer: {stats['new_examples']} new, {stats['total_examples']} total)"
         )
-        self.dataset.examples.append(example)
-        self._save_dataset()
-        print(f"✓ Added example (total: {len(self.dataset.examples)})")
+
+        # If auto-trigger enabled, check coordinator
+        if self.auto_trigger:
+            self._check_and_trigger_learning()
 
     def add_correction(
         self,
@@ -59,17 +96,23 @@ class RuleChef:
         expected_output: Dict,
         feedback: Optional[str] = None,
     ):
-        """Add a user correction (high value signal)"""
-        correction = Correction(
-            id=self._generate_id(),
-            input=input_data,
-            model_output=model_output,
-            expected_output=expected_output,
-            feedback=feedback,
+        """
+        Add a user correction (high value signal).
+
+        Uses buffer-first architecture: correction goes to buffer, then coordinator
+        decides when to trigger learning. Corrections are high-priority signals.
+        """
+        # Add to buffer (not dataset directly)
+        self.buffer.add_human_correction(input_data, expected_output, model_output)
+
+        stats = self.buffer.get_stats()
+        print(
+            f"✓ Added correction (buffer: {stats['new_corrections']} corrections, {stats['new_examples']} new total)"
         )
-        self.dataset.corrections.append(correction)
-        self._save_dataset()
-        print(f"✓ Added correction (total: {len(self.dataset.corrections)})")
+
+        # If auto-trigger enabled, check coordinator (corrections are high-value!)
+        if self.auto_trigger:
+            self._check_and_trigger_learning()
 
     def add_feedback(self, feedback: str):
         """Add general user feedback"""
@@ -77,11 +120,29 @@ class RuleChef:
         self._save_dataset()
 
     def generate_llm_examples(self, num_examples: int = 5, seed: int = 42):
-        """Generate synthetic training examples using LLM"""
+        """
+        Generate synthetic training examples using LLM.
+
+        Examples go to buffer and can trigger learning if auto_trigger=True.
+        """
         print(f"\n🤖 Generating {num_examples} examples with LLM...")
         for i in range(num_examples):
             input_data = self.learner._generate_input(self.task, self.dataset, seed + i)
-            self.add_example(input_data, {"spans": []}, source="llm_generated")
+            # Add to buffer directly to avoid N coordinator checks
+            self.buffer.add_llm_observation(
+                input_data,
+                {"spans": []},  # Empty output, just for training variety
+                metadata={"generated": True, "seed": seed + i},
+            )
+
+        stats = self.buffer.get_stats()
+        print(
+            f"✓ Generated {num_examples} examples (buffer: {stats['new_examples']} new)"
+        )
+
+        # Check coordinator once after generating all
+        if self.auto_trigger:
+            self._check_and_trigger_learning()
 
     # ========================================
     # Learning
@@ -92,6 +153,7 @@ class RuleChef:
         run_evaluation: Optional[bool] = None,
         min_examples: int = 1,
         max_refinement_iterations: int = 3,
+        sampling_strategy: Optional[str] = None,
     ):
         """
         Learn rules from all collected data
@@ -105,10 +167,52 @@ class RuleChef:
                 - False: Disable refinement (faster, synthesis only)
             min_examples: Minimum training items required
             max_refinement_iterations: Max iterations in refinement loop (1-3, default 3)
+            sampling_strategy: Override default sampling strategy for this run
+                - Options: 'balanced', 'recent', 'diversity', 'uncertain', 'varied'
         """
-        import time
 
         start_time = time.time()
+
+        # FIRST: Convert any buffered examples to dataset
+        buffer_stats = self.buffer.get_stats()
+        if buffer_stats["new_examples"] > 0:
+            print(
+                f"\n📥 Converting {buffer_stats['new_examples']} buffered examples to dataset..."
+            )
+            print(
+                f"   ({buffer_stats['new_corrections']} corrections, {buffer_stats['llm_observations']} LLM, {buffer_stats['human_examples']} human)"
+            )
+
+            for example in self.buffer.get_new_examples():
+                if example.is_correction:
+                    # Add as Correction to dataset
+                    correction = Correction(
+                        id=self._generate_id(),
+                        input=example.input,
+                        model_output=example.output.get("actual", {}),
+                        expected_output=example.output.get("expected", example.output),
+                        feedback=None,
+                    )
+                    self.dataset.corrections.append(correction)
+                else:
+                    # Add as Example to dataset
+                    ex = Example(
+                        id=self._generate_id(),
+                        input=example.input,
+                        expected_output=example.output,
+                        source=example.source,
+                    )
+                    self.dataset.examples.append(ex)
+
+            # Mark buffer as processed
+            self.buffer.mark_learned()
+
+            # Save dataset with new examples
+            self._save_dataset()
+
+            print(
+                f"✓ Converted to dataset: {len(self.dataset.corrections)} corrections, {len(self.dataset.examples)} examples"
+            )
 
         total_data = len(self.dataset.get_all_training_data())
 
@@ -134,41 +238,56 @@ class RuleChef:
             )
         else:
             print("  Mode: Synthesis only (no refinement)")
+
+        # Show sampling strategy
+        strategy = sampling_strategy or self.sampling_strategy
+        if strategy != "balanced":
+            print(f"  Sampling: {strategy}")
         print(f"{'=' * 60}\n")
 
-        # Synthesize initial ruleset
-        rules = self.learner.synthesize_ruleset(self.dataset)
+        # Temporarily override sampling strategy if provided
+        original_strategy = self.learner.sampling_strategy
+        if sampling_strategy:
+            self.learner.sampling_strategy = sampling_strategy
 
-        if not rules:
-            print("Failed to synthesize rules")
-            return None
+        try:
+            # Synthesize initial ruleset
+            rules = self.learner.synthesize_ruleset(self.dataset)
 
-        print(f"✓ Generated {len(rules)} rules")
+            if not rules:
+                print("Failed to synthesize rules")
+                return None
 
-        # Evaluate and refine
-        if run_evaluation:
-            rules, metrics = self.learner.evaluate_and_refine(
-                rules, self.dataset, max_iterations=max_refinement_iterations
-            )
-        else:
-            metrics = {"accuracy": 0.0, "total": total_data, "correct": 0}
+            print(f"✓ Generated {len(rules)} rules")
 
-        # Save learned rules
-        self.dataset.rules = rules
-        self._save_dataset()
+            # Evaluate and refine
+            if run_evaluation:
+                rules, metrics = self.learner.evaluate_and_refine(
+                    rules, self.dataset, max_iterations=max_refinement_iterations
+                )
+            else:
+                metrics = {"accuracy": 0.0, "total": total_data, "correct": 0}
 
-        elapsed = time.time() - start_time
+            # Save learned rules
+            self.dataset.rules = rules
+            self._save_dataset()
 
-        print(f"\n{'=' * 60}")
-        print(f"Learning complete! ({elapsed:.1f}s)")
-        print(f"  Rules: {len(rules)}")
-        if metrics["total"] > 0:
-            print(
-                f"  Accuracy: {metrics['accuracy']:.1%} ({metrics['correct']}/{metrics['total']})"
-            )
-        print(f"{'=' * 60}\n")
+            elapsed = time.time() - start_time
 
-        return rules, metrics
+            print(f"\n{'=' * 60}")
+            print(f"Learning complete! ({elapsed:.1f}s)")
+            print(f"  Rules: {len(rules)}")
+            if metrics["total"] > 0:
+                print(
+                    f"  Accuracy: {metrics['accuracy']:.1%} ({metrics['correct']}/{metrics['total']})"
+                )
+            print(f"{'=' * 60}\n")
+
+            return rules, metrics
+        finally:
+            # Restore original sampling strategy
+            if sampling_strategy:
+                self.learner.sampling_strategy = original_strategy
 
     # ========================================
     # Execution
@@ -217,14 +336,13 @@ Return JSON:
 }}
 """
 
-        response = self.llm.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=2000,
+        response = self.llm.chat.completions.create(
+            model=self.model,
             messages=[{"role": "user", "content": prompt}],
         )
 
         try:
-            text = response.content[0].text
+            text = response.choices[0].message.content
             if "```json" in text:
                 text = text.split("```json")[1].split("```")[0]
             elif "```" in text:
@@ -234,6 +352,155 @@ Return JSON:
         except Exception as e:
             print(f"Error in LLM extraction: {e}")
             return {"spans": []}
+
+    # ========================================
+    # Observation Mode (LLM Middleware)
+    # ========================================
+
+    def start_observing(
+        self,
+        openai_client,
+        auto_learn: bool = True,
+        check_interval: int = 60,
+        extract_input: Optional[Callable] = None,
+        extract_output: Optional[Callable] = None,
+    ):
+        """
+        Start observing OpenAI-compatible client calls to collect training examples.
+
+        Args:
+            openai_client: OpenAI client (or compatible API)
+            auto_learn: If True, automatically triggers learning when coordinator decides
+            check_interval: Seconds between coordinator checks (default 60)
+            extract_input: Custom function to parse API kwargs into task input
+            extract_output: Custom function to parse API response into task output
+
+        Returns:
+            Wrapped client - use this for API calls
+
+        Example:
+            chef = RuleChef(task)
+            client = chef.start_observing(openai_client, auto_learn=True)
+
+            # Use client normally, RuleChef observes
+            response = client.chat.completions.create(...)
+
+            # Auto-learns when ready
+        """
+        # Create observer
+        self._observer = OpenAIObserver(
+            self.buffer, self.task, extract_input, extract_output
+        )
+
+        # Attach to client
+        wrapped_client = self._observer.attach(openai_client)
+
+        # Start auto-learning loop if requested
+        if auto_learn:
+            self._start_learning_loop(check_interval)
+            print(
+                f"✓ Started observing with auto-learning (check every {check_interval}s)"
+            )
+        else:
+            print("✓ Started observing (manual learning mode)")
+
+        return wrapped_client
+
+    def stop_observing(self):
+        """Stop observing LLM calls and background learning"""
+        # Stop background thread
+        if self._learning_thread:
+            self._stop_learning.set()
+            self._learning_thread.join(timeout=5)
+            self._learning_thread = None
+            self._stop_learning.clear()
+
+        # Detach observer
+        if self._observer:
+            self._observer.detach()
+            self._observer = None
+
+        print("✓ Stopped observing")
+
+    def _start_learning_loop(self, interval: int):
+        """Background thread that periodically checks if learning should trigger"""
+
+        def loop():
+            while not self._stop_learning.is_set():
+                try:
+                    # Ask coordinator if we should learn
+                    decision = self.coordinator.should_trigger_learning(
+                        self.buffer, self.dataset.rules
+                    )
+
+                    if decision.should_learn:
+                        print(f"\n{'=' * 60}")
+                        print(f"Auto-triggering learning: {decision.reasoning}")
+                        print(f"{'=' * 60}")
+                        self._auto_learn(decision)
+
+                except Exception as e:
+                    print(f"Error in learning loop: {e}")
+
+                # Wait for next check
+                self._stop_learning.wait(interval)
+
+        self._learning_thread = threading.Thread(target=loop, daemon=True)
+        self._learning_thread.start()
+
+    def _auto_learn(self, decision):
+        """Execute learning based on coordinator decision"""
+        old_rules = self.dataset.rules.copy() if self.dataset.rules else None
+
+        try:
+            # learn_rules() will convert buffer → dataset automatically
+            rules, metrics = self.learn_rules(
+                sampling_strategy=decision.strategy,
+                max_refinement_iterations=decision.max_iterations,
+            )
+
+            # Notify coordinator of results
+            self.coordinator.on_learning_complete(old_rules, rules, metrics)
+
+        except Exception as e:
+            print(f"Error during auto-learning: {e}")
+
+    def _check_and_trigger_learning(self):
+        """
+        Check coordinator and trigger learning if ready.
+
+        Called after add_example() or add_correction() when auto_trigger=True.
+        """
+        decision = self.coordinator.should_trigger_learning(
+            self.buffer, self.dataset.rules
+        )
+
+        if decision.should_learn:
+            print(f"\n{'=' * 60}")
+            print(f"Auto-triggering learning: {decision.reasoning}")
+            print(f"{'=' * 60}")
+            self._auto_learn(decision)
+
+    def trigger_manual_learning(self):
+        """Manually trigger learning from buffered examples"""
+        decision = self.coordinator.should_trigger_learning(
+            self.buffer, self.dataset.rules
+        )
+
+        if decision.should_learn:
+            print(f"✓ Triggering learning: {decision.reasoning}")
+            self._auto_learn(decision)
+            return True
+        else:
+            print(f"✗ Not ready to learn: {decision.reasoning}")
+            return False
+
+    def get_buffer_stats(self) -> Dict:
+        """Get statistics about buffered examples"""
+        return {
+            **self.buffer.get_stats(),
+            "coordinator_analysis": self.coordinator.analyze_buffer(self.buffer),
+        }
 
     # ========================================
     # Utils
