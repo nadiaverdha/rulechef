@@ -156,7 +156,8 @@ class OpenAIObserver:
         except Exception:
             # If not JSON, return as plain text (could be answer)
             content = response.choices[0].message.content
-            return {"spans": [{"text": content, "start": 0, "end": len(content)}]}
+            #return response.choices[0].message.content
+            return {"spans": [{"text": content, "start": 0, "end": len(content), "label":content}]}
 
 
 def create_qa_extractor():

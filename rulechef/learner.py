@@ -522,6 +522,7 @@ Return refined ruleset in same JSON format:
         spans = []
 
         for match in pattern.finditer(context):
+            print(match.lastgroup())
             spans.append(
                 Span(
                     text=match.group(),
@@ -557,6 +558,7 @@ Return refined ruleset in same JSON format:
                             start=result.get("start", 0),
                             end=result.get("end", 0),
                             score=result.get("score", rule.confidence),
+                            label = result.get("label","")
                         )
                         spans.append(span)
                     else:
@@ -588,6 +590,7 @@ Return refined ruleset in same JSON format:
                         start=s["start"],
                         end=s["end"],
                         score=s.get("score", 0.5),
+                        label = s["label"]
                     )
                 )
             else:
@@ -626,7 +629,7 @@ Return refined ruleset in same JSON format:
         """Format output for prompt"""
         spans = output.get("spans", [])
         return json.dumps(
-            [{"text": s["text"], "start": s["start"], "end": s["end"]} for s in spans]
+            [{"text": s["text"], "start": s["start"], "end": s["end"], "label":s["label"]} for s in spans]
         )
 
     def _format_rules(self, rules: List[Rule]) -> str:

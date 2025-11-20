@@ -253,7 +253,7 @@ class RuleChef:
         try:
             # Synthesize initial ruleset
             rules = self.learner.synthesize_ruleset(self.dataset)
-
+            print("RULES", self.dataset.rules)
             if not rules:
                 print("Failed to synthesize rules")
                 return None
@@ -277,6 +277,7 @@ class RuleChef:
             print(f"\n{'=' * 60}")
             print(f"Learning complete! ({elapsed:.1f}s)")
             print(f"  Rules: {len(rules)}")
+            print("RULES", self.dataset.rules)
             if metrics["total"] > 0:
                 print(
                     f"  Accuracy: {metrics['accuracy']:.1%} ({metrics['correct']}/{metrics['total']})"
@@ -316,14 +317,15 @@ class RuleChef:
             if avg_confidence < 0.3:
                 print(f"Low confidence ({avg_confidence:.1%}), using LLM fallback...")
                 return self._execute_with_llm(input_data)
-
+        print("OUTPUT",output)
         return output
 
     def _execute_with_llm(self, input_data: Dict) -> Dict:
         """Execute extraction using LLM directly"""
 
         # Format input for prompt
-        prompt = f"""Extract answer spans from the following:
+        # Format input for prompt
+        prompt = f"""Extract all named entities from the text:
 
 Question: {input_data.get("question", "")}
 Context: {input_data.get("context", "")}
@@ -331,7 +333,7 @@ Context: {input_data.get("context", "")}
 Return JSON:
 {{
   "spans": [
-    {{"text": "...", "start": 0, "end": 10}}
+    {{"text": "...", "start": 0, "end": 10,"label":"PERSON|ORG|DATE|LOCATION"}}
   ]
 }}
 """
