@@ -22,7 +22,6 @@ class Span:
     end: int
     label: str
     score: float = 1.0
-  
 
     def overlaps(self, other: "Span") -> bool:
         """Check if spans overlap"""
@@ -44,7 +43,7 @@ class Span:
             "start": self.start,
             "end": self.end,
             "score": self.score,
-            "label":self.label
+            "label":self.label,
         }
 
 

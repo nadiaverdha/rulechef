@@ -213,7 +213,7 @@ class RuleChef:
             print(
                 f"✓ Converted to dataset: {len(self.dataset.corrections)} corrections, {len(self.dataset.examples)} examples"
             )
-
+        print(self.dataset.rules)
         total_data = len(self.dataset.get_all_training_data())
 
         if total_data < min_examples:
@@ -232,6 +232,7 @@ class RuleChef:
         print(f"Learning rules from {total_data} training items")
         print(f"  Corrections: {len(self.dataset.corrections)} (high value)")
         print(f"  Examples: {len(self.dataset.examples)}")
+        print("RULES",self.dataset.rules)
         if run_evaluation:
             print(
                 f"  Mode: Synthesis + Refinement (max {max_refinement_iterations} iterations)"
@@ -253,7 +254,7 @@ class RuleChef:
         try:
             # Synthesize initial ruleset
             rules = self.learner.synthesize_ruleset(self.dataset)
-            print("RULES", self.dataset.rules)
+
             if not rules:
                 print("Failed to synthesize rules")
                 return None
@@ -277,7 +278,6 @@ class RuleChef:
             print(f"\n{'=' * 60}")
             print(f"Learning complete! ({elapsed:.1f}s)")
             print(f"  Rules: {len(rules)}")
-            print("RULES", self.dataset.rules)
             if metrics["total"] > 0:
                 print(
                     f"  Accuracy: {metrics['accuracy']:.1%} ({metrics['correct']}/{metrics['total']})"
@@ -306,24 +306,25 @@ class RuleChef:
 
         # Apply rules
         output = self.learner._apply_rules(self.dataset.rules, input_data)
-
+        
         # Store current extraction for potential correction
         self.current_extraction = output
 
         # Check confidence
         spans = output.get("spans", [])
+        print(spans)
+        print("OUTPUT",output)
         if spans:
             avg_confidence = sum(s.get("score", 0.5) for s in spans) / len(spans)
             if avg_confidence < 0.3:
                 print(f"Low confidence ({avg_confidence:.1%}), using LLM fallback...")
                 return self._execute_with_llm(input_data)
-        print("OUTPUT",output)
+
         return output
 
     def _execute_with_llm(self, input_data: Dict) -> Dict:
         """Execute extraction using LLM directly"""
 
-        # Format input for prompt
         # Format input for prompt
         prompt = f"""Extract all named entities from the text:
 

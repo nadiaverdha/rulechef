@@ -288,7 +288,7 @@ For CODE format, provide a function that takes input dict and returns list of di
 ```python
 def extract(input_data):
     # input_data is dict with keys from input_schema
-    # return list of dicts: [{"text": "...", "start": 0, "end": 10}, ...]
+    # return list of dicts: [{"text": "...", "start": 0, "end": 10, "label":"..."}, ...]
     import re
     spans = []
     # your logic here
@@ -434,7 +434,7 @@ Allowed rule formats: {", ".join(fmt.value for fmt in self.allowed_formats)}
 
         if RuleFormat.CODE in self.allowed_formats:
             prompt += """
-For CODE rules, return list of dicts: [{"text": "...", "start": 0, "end": 10}, ...]
+For CODE rules, return list of dicts: [{"text": "...", "start": 0, "end": 10, "label":"..."}, ...]
 """
 
         prompt += """
@@ -520,18 +520,21 @@ Return refined ruleset in same JSON format:
         pattern = re.compile(rule.content)
         context = input_data.get("context", "")
         spans = []
+        label = match.LASTGROUP 
+        print("LABEL",label)
 
         for match in pattern.finditer(context):
-            print(match.lastgroup())
+            print(match)
             spans.append(
                 Span(
                     text=match.group(),
                     start=match.start(),
                     end=match.end(),
                     score=rule.confidence,
+                    label= match.lastgroup() or "ENTITY"
                 )
             )
-
+        print(spans)
         return spans
 
     def _execute_code_rule(self, rule: Rule, input_data: Dict) -> List[Span]:
@@ -557,8 +560,8 @@ Return refined ruleset in same JSON format:
                             text=result.get("text", ""),
                             start=result.get("start", 0),
                             end=result.get("end", 0),
+                            label=result.get("label", ""),
                             score=result.get("score", rule.confidence),
-                            label = result.get("label","")
                         )
                         spans.append(span)
                     else:
@@ -589,8 +592,8 @@ Return refined ruleset in same JSON format:
                         text=s["text"],
                         start=s["start"],
                         end=s["end"],
+                        label= s["label"],
                         score=s.get("score", 0.5),
-                        label = s["label"]
                     )
                 )
             else:
@@ -629,7 +632,7 @@ Return refined ruleset in same JSON format:
         """Format output for prompt"""
         spans = output.get("spans", [])
         return json.dumps(
-            [{"text": s["text"], "start": s["start"], "end": s["end"], "label":s["label"]} for s in spans]
+            [{"text": s["text"], "start": s["start"], "end": s["end"], "label": s["label"]} for s in spans]
         )
 
     def _format_rules(self, rules: List[Rule]) -> str:
