@@ -1,26 +1,26 @@
 """Main RuleChef orchestrator"""
 
 import json
-import threading
 import time
+import threading
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 
 from openai import OpenAI
 
-from rulechef.buffer import ExampleBuffer
-from rulechef.coordinator import CoordinatorProtocol, SimpleCoordinator
 from rulechef.core import (
-    DEFAULT_OUTPUT_KEYS,
-    Correction,
+    Task,
     Dataset,
     Example,
+    Correction,
     Rule,
     RuleFormat,
-    Task,
     TaskType,
+    DEFAULT_OUTPUT_KEYS,
 )
 from rulechef.learner import RuleLearner
+from rulechef.buffer import ExampleBuffer
+from rulechef.coordinator import CoordinatorProtocol, SimpleCoordinator
 from rulechef.openai_wrapper import OpenAIObserver
 
 
@@ -105,26 +105,6 @@ class RuleChef:
             f"✓ Added example (buffer: {stats['new_examples']} new, {stats['total_examples']} total)"
         )
 
-        # If auto-trigger enabled, check coordinator
-        if self.auto_trigger:
-            self._check_and_trigger_learning()
-
-    def add_negative_example(
-        self, input_data: Dict, output_data: Dict, source: str = "human_negative"
-    ):
-        """
-        Add a negative training example.
-
-        Uses buffer-first architecture: example goes to buffer, then coordinator
-        decides when to trigger learning.
-        """
-
-        self.buffer.add_human_example(input_data, output_data, is_negative=True)
-        stats = self.buffer.get_stats()
-        print(
-            f"✗ Added negative example "
-            f"(buffer: {stats['new_examples']} new, {stats['total_examples']} total)"
-        )
         # If auto-trigger enabled, check coordinator
         if self.auto_trigger:
             self._check_and_trigger_learning()

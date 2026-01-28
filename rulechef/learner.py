@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 from openai import OpenAI
 
-from rulechef.core import Correction, Dataset, Rule, RuleFormat, TaskType
+from rulechef.core import Rule, RuleFormat, Dataset, Correction, TaskType
 from rulechef.executor import RuleExecutor
 from rulechef.matching import outputs_match
 from rulechef.prompts import PromptBuilder
@@ -262,22 +262,6 @@ class RuleLearner:
                 rules, item.input, dataset.task.type, dataset.task.text_field
             )
             expected = item.expected_output
-            print("EXTRACTED", extracted)
-            print("--------------------------------------------------------")
-            print("EXPECTED", expected)
-            print("################################################")
-
-            if getattr(item, "is_negative", False):
-                # if any negative span is matched then thats a failure
-                negative_matched = any(
-                    span in extracted.get("entities", [])
-                    for span in expected.get("entities", [])
-                )
-                if negative_matched:
-                    print("NEGATIVE MATCHED", item)
-                    failures.append(item)
-                else:
-                    correct += 1
 
             if outputs_match(
                 expected,
@@ -296,7 +280,6 @@ class RuleLearner:
                         "is_correction": isinstance(item, Correction),
                     }
                 )
-                # print(failures)
 
         return {
             "total": total,
@@ -309,7 +292,6 @@ class RuleLearner:
         self, current_rules: List[Rule], failures: List[Dict], dataset: Dataset
     ) -> Optional[List[Rule]]:
         """Refine rules based on failures"""
-        print("REFINEMENT RULES")
         sampled_failures = self._sample_failures(failures, max_samples=20)
         prompt = self.prompt_builder.build_refinement_prompt(
             current_rules, sampled_failures, dataset
@@ -623,7 +605,6 @@ Return JSON:
 
     def _pattern_uses_ent_type(self, pattern_data: List) -> bool:
         """Detect spaCy patterns that rely on NER entity types."""
-
         def _walk(value):
             if isinstance(value, dict):
                 for k, v in value.items():
