@@ -109,6 +109,26 @@ class RuleChef:
         if self.auto_trigger:
             self._check_and_trigger_learning()
 
+    def add_negative_example(
+        self, input_data: Dict, output_data: Dict, source: str = "human_negative"
+    ):
+        """
+        Add a negative training example.
+
+        Uses buffer-first architecture: example goes to buffer, then coordinator
+        decides when to trigger learning.
+        """
+
+        self.buffer.add_human_example(input_data, output_data, is_negative=True)
+        stats = self.buffer.get_stats()
+        print(
+            f"✗ Added negative example "
+            f"(buffer: {stats['new_examples']} new, {stats['total_examples']} total)"
+        )
+        # If auto-trigger enabled, check coordinator
+        if self.auto_trigger:
+            self._check_and_trigger_learning()
+
     def add_correction(
         self,
         input_data: Dict,
@@ -222,6 +242,7 @@ class RuleChef:
                         input=example.input,
                         expected_output=example.output,
                         source=example.source,
+                        is_negative=example.is_negative,
                     )
                     self.dataset.examples.append(ex)
 

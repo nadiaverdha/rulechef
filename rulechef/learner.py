@@ -60,6 +60,7 @@ class RuleLearner:
     ) -> List[Rule]:
         """Generate initial ruleset from dataset"""
         prompt = self._build_synthesis_prompt(dataset, max_rules)
+        print("NEW PROMPT", prompt)
 
         print("📚 Synthesizing rules from dataset...")
         start = time.time()
@@ -387,7 +388,14 @@ class RuleLearner:
 
         # Separate corrections and examples
         corrections = [d for d in sampled_data if isinstance(d, Correction)]
-        examples = [d for d in sampled_data if not isinstance(d, Correction)]
+        examples = [
+            d
+            for d in sampled_data
+            if not isinstance(d, Correction) and not d.is_negative
+        ]
+        negative_examples = [
+            d for d in sampled_data if not isinstance(d, Correction) and d.is_negative
+        ]
 
         # Build base prompt from builder
         prompt = self.prompt_builder._build_task_header(dataset)
@@ -397,7 +405,10 @@ class RuleLearner:
             prompt += self.prompt_builder._build_corrections_section(corrections)
         if examples:
             prompt += self.prompt_builder._build_examples_section(examples)
-
+        if negative_examples:
+            prompt += self.prompt_builder._build_negative_examples_section(
+                negative_examples
+            )
         # Add other sections
         prompt += self.prompt_builder._build_feedback_section(dataset)
         prompt += self.prompt_builder._build_existing_rules_section(dataset)
@@ -605,6 +616,7 @@ Return JSON:
 
     def _pattern_uses_ent_type(self, pattern_data: List) -> bool:
         """Detect spaCy patterns that rely on NER entity types."""
+
         def _walk(value):
             if isinstance(value, dict):
                 for k, v in value.items():

@@ -281,6 +281,7 @@ class Example:
     input: Dict[str, Any]
     expected_output: Dict[str, Any]
     source: str  # "human_labeled" | "llm_generated"
+    is_negative: bool = False
     confidence: float = 0.8
     timestamp: datetime = field(default_factory=datetime.now)
 
@@ -289,6 +290,7 @@ class Example:
             "id": self.id,
             "input": self.input,
             "expected_output": self.expected_output,
+            "is_negative": self.is_negative,
             "source": self.source,
             "confidence": self.confidence,
         }

@@ -236,16 +236,6 @@ Example 1 - Organizations with corporate suffixes:
   "output_key": "entities",
   "priority": 9
 }
-
-Example 2 - Person names (two capitalized words):
-{
-  "name": "person_names",
-  "format": "regex",
-  "pattern": "\\b([A-Z][a-z]+)\\s+([A-Z][a-z]+)\\b",
-  "output_template": {"text": "$0", "start": "$start", "end": "$end", "type": "PER"},
-  "output_key": "entities",
-  "priority": 7
-}
 """
 
 NER_RULE_EXAMPLES_SPACY = """
@@ -488,6 +478,26 @@ Output schema:
         for ex in examples:
             lines.append(f"\nInput: {json.dumps(ex.input)}")
             lines.append(f"Output: {json.dumps(ex.expected_output)}")
+
+        return "\n".join(lines)
+
+    def _build_negative_examples_section(self, negative_examples: List[Any]) -> str:
+        """Build section showing negative examples"""
+        if not negative_examples:
+            return ""
+        
+        lines = [f"\n\n NEGATIVE TRAINING EXAMPLES ({len(negative_examples)} shown):"]
+        lines.append("CRITICAL:")
+        lines.append("- NONE of the entities shown below are ORG")
+        lines.append("\nThese examples contain spans that MUST NOT be extracted.")
+
+        lines.append("- You MUST NOT generate rules that extract these patterns.")
+        lines.append("- You MUST NOT output these entity types under any circumstances")
+        for ex in negative_examples:
+            lines.append(f"\nInput: {json.dumps(ex.input)}")
+            lines.append(f"Output: {json.dumps(ex.expected_output)}")
+
+        
 
         return "\n".join(lines)
 
